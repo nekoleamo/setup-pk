@@ -2,8 +2,12 @@
 # 两个 job 串起来验证**冷缓存 → 热缓存**两条路径。
 #
 #   cold：第一次跑，断言 cache-hit=false，且 pk install 的 NDJSON 里出现 download
-#   warm：复用 cold 存下的缓存，断言 cache-hit=true；清掉工具树（保留 PK_CACHE）后
-#         重装必须出 cache 事件（说明吃的是本地归档，不是又下了一遍）
+#   warm：复用 cold 存下的缓存，断言 cache-hit=true；清掉工具树与 state/（模拟**全新 runner**）
+#         后重装必须只出 cache 事件、不出 download（说明吃的是本地归档，不是又下了一遍）
+#
+# ⚠️ warm 的断言依赖 pk ≥ 1.8（R-CACHE-1：缓存目录里带 <PK_CACHE>/alias 上游摘要别名）。
+#    更早的 pk 在没有 TOFU/台账时会先下产物再算摘要，这条断言必然红 ——
+#    所以**等 1.8 发布并把 vars.PK_VERSION 指过去之后**，再把本文件同步到 setup-pk 仓库。
 name: self-test
 
 on:
@@ -72,16 +76,17 @@ jobs:
         run: |
           set -eu
           test "$HIT" = "true" || { echo "::error::第二次跑应命中缓存（cache-hit=$HIT）"; exit 1; }
-          # 只清**解压出来的工具树**，PK_CACHE 与 state/（台账 + TOFU 摘要）留着。
-          # 为什么不清 state：归档在缓存里是**内容寻址**名（<sha256>.tar.gz），要按摘要找回来，
-          # 就必须先有 TOFU 记录；state 一清，pk 只能先下产物再算摘要 —— 那是"缓存白存"，
-          # 也是最容易让人误解的地方（见 docs：R-CACHE-1 待办）。
-          rm -rf "$HOME/.packnest/tools"
+          # 连 state/（台账 + TOFU 摘要）一起清掉：这才是**新 runner** 的真实形状。
+          # R-CACHE-1 修之前这一步必然失败：内容寻址的归档要按 sha256 找回来，
+          # 而新机器既没 TOFU 也没台账，只能先下 50MB 再算摘要（缓存白存）。
+          # 现在缓存目录里还有「上游摘要别名」（PK_CACHE/alias/），
+          # 拿一次几 KB 的 SHASUMS256.txt 就能直接命中归档。
+          rm -rf "$HOME/.packnest/tools" "$HOME/.packnest/state"
           rm -f pk.lock
           pk install --json > warm.ndjson
           grep -q '"ev":"cache"' warm.ndjson \
             || { echo "::error::命中缓存时应出现 cache 事件（0 网络）"; cat warm.ndjson; exit 1; }
           if grep -q '"ev":"download"' warm.ndjson; then
-            echo "::error::命中缓存时不该再下载"; grep '"ev":"download"' warm.ndjson; exit 1
+            echo "::error::新 runner + 热缓存不该再下载产物"; grep '"ev":"download"' warm.ndjson; exit 1
           fi
           node -v
